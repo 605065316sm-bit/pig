@@ -1,0 +1,476 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Hand-drawn Pig (Line Art) + Red Yeah~ + Confetti</title>
+  <style>
+    body{
+      margin:0; height:100vh; display:grid; place-items:center;
+      background:#0b0b0f; color:#eaeaf0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;
+    }
+    .wrap{display:flex; flex-direction:column; gap:12px; align-items:center;}
+    canvas{background:#ffffff; border:1px solid #d9d9e3; border-radius:16px;}
+    button{
+      cursor:pointer; border:1px solid #2a2c3a; background:#151728; color:#eaeaf0;
+      padding:8px 12px; border-radius:10px;
+    }
+    button:hover{filter:brightness(1.08)}
+    .hint{opacity:.8; font-size:14px}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <canvas id="c" width="640" height="460"></canvas>
+    <div style="display:flex; gap:10px;">
+      <button id="replay">Replay</button>
+      <button id="skip">Skip</button>
+    </div>
+    <div class="hint">猪头线稿一笔一笔画 → 红笔写 “Yeah~” → 写完后飘彩带特效</div>
+  </div>
+
+<script>
+(() => {
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+  const W = canvas.width, H = canvas.height;
+  const cx = W/2, cy = H/2 + 18;
+
+  const INK = "#151515";
+  const RED = "#ff0000";
+
+  function clear() {
+    ctx.clearRect(0,0,W,H);
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0,0,W,H);
+  }
+
+  // ---------- 稳定随机 ----------
+  function mulberry32(seed) {
+    return function() {
+      let t = seed += 0x6D2B79F5;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  function jitterPoint(x, y, rand, amp){
+    return [x + (rand()*2-1)*amp, y + (rand()*2-1)*amp];
+  }
+
+  // ---------- 点集生成 ----------
+  function ellipsePoints(x, y, rx, ry, steps=220){
+    const pts = [];
+    for(let i=0;i<=steps;i++){
+      const t = (i/steps) * Math.PI * 2;
+      pts.push([x + Math.cos(t)*rx, y + Math.sin(t)*ry]);
+    }
+    return pts;
+  }
+  function quadBezierPoints(p0, p1, p2, steps=90){
+    const pts = [];
+    for(let i=0;i<=steps;i++){
+      const t = i/steps;
+      const x = (1-t)*(1-t)*p0[0] + 2*(1-t)*t*p1[0] + t*t*p2[0];
+      const y = (1-t)*(1-t)*p0[1] + 2*(1-t)*t*p1[1] + t*t*p2[1];
+      pts.push([x,y]);
+    }
+    return pts;
+  }
+  function cubicBezierPoints(p0, p1, p2, p3, steps=90){
+    const pts = [];
+    for(let i=0;i<=steps;i++){
+      const t = i/steps;
+      const u = 1 - t;
+      const x = u*u*u*p0[0] + 3*u*u*t*p1[0] + 3*u*t*t*p2[0] + t*t*t*p3[0];
+      const y = u*u*u*p0[1] + 3*u*u*t*p1[1] + 3*u*t*t*p2[1] + t*t*t*p3[1];
+      pts.push([x,y]);
+    }
+    return pts;
+  }
+  function linePoints(x1,y1,x2,y2, steps=40){
+    const pts = [];
+    for(let i=0;i<=steps;i++){
+      const t = i/steps;
+      pts.push([x1 + (x2-x1)*t, y1 + (y2-y1)*t]);
+    }
+    return pts;
+  }
+
+  // ---------- 手绘描边：支持颜色 ----------
+  function drawHandStroke(points, progress01, opt){
+    const {
+      seed = 1,
+      width = 10,
+      amp = 1.8,
+      passes = 3,
+      alpha = 1,
+      color = INK
+    } = opt || {};
+
+    const n = points.length;
+    const k = Math.max(2, Math.floor(n * Math.max(0, Math.min(1, progress01))));
+
+    for(let p=0; p<passes; p++){
+      const rand = mulberry32(seed + p*999);
+      ctx.save();
+      ctx.globalAlpha = alpha * (p === 0 ? 1 : 0.72);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = width * (p === 0 ? 1 : 0.92);
+      ctx.lineCap = "round";
+      ctx.lineJoin = "round";
+
+      ctx.beginPath();
+      let [x0,y0] = jitterPoint(points[0][0], points[0][1], rand, amp*0.6);
+      ctx.moveTo(x0,y0);
+
+      for(let i=1; i<k; i++){
+        const localAmp = amp * (0.65 + 0.35*Math.sin(i*0.12));
+        const [x,y] = jitterPoint(points[i][0], points[i][1], rand, localAmp);
+        ctx.lineTo(x,y);
+
+        // 轻微“抬笔”断续（更像一段一段画）
+        if(i % 26 === 0){
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(x,y);
+        }
+      }
+
+      ctx.stroke();
+      ctx.restore();
+    }
+  }
+
+  // ---------- 猪头线稿点集 ----------
+  const facePts = ellipsePoints(cx, cy-10, 170, 165, 260);
+
+  const leftEarPts = [
+    ...quadBezierPoints([cx-110, cy-125], [cx-215, cy-205], [cx-215, cy-85], 85),
+    ...quadBezierPoints([cx-215, cy-85],  [cx-175, cy-35],  [cx-110, cy-78], 85),
+    ...quadBezierPoints([cx-110, cy-78],  [cx-90,  cy-98],  [cx-110, cy-125], 45),
+  ];
+
+  const rightEarPts = [
+    ...quadBezierPoints([cx+110, cy-125], [cx+215, cy-205], [cx+215, cy-85], 85),
+    ...quadBezierPoints([cx+215, cy-85],  [cx+175, cy-35],  [cx+110, cy-78], 85),
+    ...quadBezierPoints([cx+110, cy-78],  [cx+90,  cy-98],  [cx+110, cy-125], 45),
+  ];
+
+  const leftEyePts  = ellipsePoints(cx-55, cy-70, 18, 14, 120);
+  const rightEyePts = ellipsePoints(cx+55, cy-70, 18, 14, 120);
+
+  const snoutPts = ellipsePoints(cx, cy+35, 95, 70, 180);
+  const nostrilLPts = ellipsePoints(cx-30, cy+35, 12, 18, 90);
+  const nostrilRPts = ellipsePoints(cx+30, cy+35, 12, 18, 90);
+
+  const mouthPts = quadBezierPoints([cx-55, cy+105], [cx, cy+132], [cx+55, cy+105], 120);
+
+  // ---------- 红色手写 “Yeah~”：拆成笔画 ----------
+  function buildYeahStrokes() {
+    const baseY = cy - 12;
+    const startX = cx - 150;
+    const h = 84;
+    const w = 54;
+    const gap = 18;
+
+    const top = baseY - h/2;
+    const bottom = baseY + h/2;
+    const mid = baseY;
+
+    const xY = startX;
+    const xe = xY + w + gap;
+    const xa = xe + w + gap;
+    const xh = xa + w + gap;
+    const xT = xh + w + gap;
+
+    const strokes = [];
+
+    // Y：两斜线到中点 + 竖下
+    strokes.push(linePoints(xY, top, xY + w*0.50, mid - 6, 40));
+    strokes.push(linePoints(xY + w, top, xY + w*0.50, mid - 6, 40));
+    strokes.push(linePoints(xY + w*0.50, mid - 6, xY + w*0.50, bottom, 55));
+
+    // e：c形 + 横
+    const eCx = xe + w*0.48;
+    const eCy = mid + 6;
+    strokes.push(cubicBezierPoints(
+      [eCx + 18, eCy - 10],
+      [eCx - 10, eCy - 34],
+      [eCx - 28, eCy + 18],
+      [eCx + 16, eCy + 18],
+      90
+    ));
+    strokes.push(linePoints(xe + w*0.15, eCy, xe + w*0.80, eCy, 28));
+
+    // a：圈 + 尾巴
+    const aCx = xa + w*0.45;
+    const aCy = mid + 8;
+    strokes.push(ellipsePoints(aCx, aCy, 18, 18, 110));
+    strokes.push(cubicBezierPoints(
+      [aCx + 18, aCy - 2],
+      [aCx + 34, aCy - 18],
+      [aCx + 36, aCy + 10],
+      [aCx + 18, aCy + 20],
+      70
+    ));
+
+    // h：竖线 + 拱
+    strokes.push(linePoints(xh + w*0.20, top, xh + w*0.20, bottom, 70));
+    strokes.push(cubicBezierPoints(
+      [xh + w*0.20, mid - 2],
+      [xh + w*0.40, mid - 36],
+      [xh + w*0.90, mid - 12],
+      [xh + w*0.72, mid + 26],
+      85
+    ));
+
+    // ~：波浪
+    const tY = baseY + 44;
+    strokes.push(cubicBezierPoints(
+      [xT, tY],
+      [xT + 18, tY - 16],
+      [xT + 36, tY + 16],
+      [xT + 54, tY],
+      70
+    ));
+    strokes.push(cubicBezierPoints(
+      [xT + 54, tY],
+      [xT + 72, tY - 16],
+      [xT + 90, tY + 16],
+      [xT + 108, tY],
+      70
+    ));
+
+    return strokes;
+  }
+
+  const yeahStrokes = buildYeahStrokes();
+
+  function drawYeahHandwritten(overallProgress){
+    const n = yeahStrokes.length;
+    const p = Math.max(0, Math.min(1, overallProgress));
+    const scaled = p * n;
+    const fullCount = Math.floor(scaled);
+    const rest = scaled - fullCount;
+
+    for(let i=0;i<fullCount;i++){
+      drawHandStroke(yeahStrokes[i], 1, {
+        seed: 900 + i*17,
+        width: 8,
+        amp: 1.6,
+        passes: 3,
+        color: RED
+      });
+    }
+    if(fullCount < n){
+      drawHandStroke(yeahStrokes[fullCount], rest, {
+        seed: 900 + fullCount*17,
+        width: 8,
+        amp: 1.6,
+        passes: 3,
+        color: RED
+      });
+    }
+  }
+
+  // ---------- 彩带特效 ----------
+  let ribbons = null;
+  function initRibbons(seed=2026){
+    const rand = mulberry32(seed);
+    const colors = [
+      "#ff4d4d","#ffb84d","#ffee4d","#7dff4d","#4dffef",
+      "#4d7dff","#b84dff","#ff4dd8","#00c2ff","#00d084"
+    ];
+    const count = 160;
+    ribbons = Array.from({length:count}, () => {
+      const w = 6 + rand()*10;
+      const h = 14 + rand()*26;
+      return {
+        x: rand()*W,
+        y: -rand()*H,
+        vx: (rand()*2-1)*0.45,
+        vy: 1.2 + rand()*2.4,
+        rot: rand()*Math.PI*2,
+        vr: (rand()*2-1)*0.12,
+        w, h,
+        color: colors[(rand()*colors.length)|0],
+        sway: rand()*Math.PI*2,
+        swaySpeed: 0.02 + rand()*0.03
+      };
+    });
+  }
+
+  function drawRibbons(dt){
+    if(!ribbons) return;
+    const t = dt / 16.67;
+    for(const r of ribbons){
+      r.sway += r.swaySpeed * t;
+      const swayX = Math.sin(r.sway) * 0.9;
+
+      r.x += (r.vx + swayX) * t;
+      r.y += r.vy * t;
+      r.rot += r.vr * t;
+
+      if(r.y > H + 40){
+        r.y = -40 - Math.random()*120;
+        r.x = Math.random()*W;
+      }
+      if(r.x < -40) r.x = W + 40;
+      if(r.x > W + 40) r.x = -40;
+
+      ctx.save();
+      ctx.translate(r.x, r.y);
+      ctx.rotate(r.rot);
+      ctx.fillStyle = r.color;
+      ctx.globalAlpha = 0.95;
+
+      ctx.beginPath();
+      ctx.roundRect(-r.w/2, -r.h/2, r.w, r.h, 2);
+      ctx.fill();
+
+      ctx.globalAlpha = 0.25;
+      ctx.fillStyle = "#000";
+      ctx.beginPath();
+      ctx.roundRect(-r.w/2, -r.h/2 + r.h*0.52, r.w, r.h*0.18, 2);
+      ctx.fill();
+
+      ctx.restore();
+    }
+  }
+
+  function drawPigComplete(){
+    drawHandStroke(facePts, 1, {seed:10, width:11, amp:2.2, passes:3, color: INK});
+    drawHandStroke(leftEarPts, 1, {seed:21, width:9, amp:2.4, passes:3, color: INK});
+    drawHandStroke(rightEarPts, 1,{seed:22, width:9, amp:2.4, passes:3, color: INK});
+    drawHandStroke(leftEyePts, 1, {seed:31, width:6, amp:1.5, passes:2, color: INK});
+    drawHandStroke(rightEyePts, 1,{seed:32, width:6, amp:1.5, passes:2, color: INK});
+    drawHandStroke(snoutPts, 1, {seed:41, width:8, amp:2.0, passes:3, color: INK});
+    drawHandStroke(nostrilLPts, 1, {seed:51, width:6, amp:1.2, passes:2, color: INK});
+    drawHandStroke(nostrilRPts, 1, {seed:52, width:6, amp:1.2, passes:2, color: INK});
+    drawHandStroke(mouthPts, 1, {seed:61, width:7, amp:1.8, passes:3, color: INK});
+  }
+
+  const steps = [
+    { name:"face", duration: 1300, render:(p)=>{
+      clear();
+      drawHandStroke(facePts, p, {seed:10, width:11, amp:2.2, passes:3, color: INK});
+    }},
+    { name:"ears", duration: 1100, render:(p)=>{
+      clear();
+      drawHandStroke(facePts, 1, {seed:10, width:11, amp:2.2, passes:3, color: INK});
+      drawHandStroke(leftEarPts, p, {seed:21, width:9, amp:2.4, passes:3, color: INK});
+      drawHandStroke(rightEarPts, p,{seed:22, width:9, amp:2.4, passes:3, color: INK});
+    }},
+    { name:"eyes", duration: 900, render:(p)=>{
+      clear();
+      drawHandStroke(facePts, 1, {seed:10, width:11, amp:2.2, passes:3, color: INK});
+      drawHandStroke(leftEarPts, 1, {seed:21, width:9, amp:2.4, passes:3, color: INK});
+      drawHandStroke(rightEarPts, 1,{seed:22, width:9, amp:2.4, passes:3, color: INK});
+
+      drawHandStroke(leftEyePts, p,  {seed:31, width:6, amp:1.5, passes:2, color: INK});
+      drawHandStroke(rightEyePts, p, {seed:32, width:6, amp:1.5, passes:2, color: INK});
+    }},
+    { name:"snout", duration: 950, render:(p)=>{
+      clear();
+      drawHandStroke(facePts, 1, {seed:10, width:11, amp:2.2, passes:3, color: INK});
+      drawHandStroke(leftEarPts, 1, {seed:21, width:9, amp:2.4, passes:3, color: INK});
+      drawHandStroke(rightEarPts, 1,{seed:22, width:9, amp:2.4, passes:3, color: INK});
+      drawHandStroke(leftEyePts, 1, {seed:31, width:6, amp:1.5, passes:2, color: INK});
+      drawHandStroke(rightEyePts, 1,{seed:32, width:6, amp:1.5, passes:2, color: INK});
+
+      drawHandStroke(snoutPts, p, {seed:41, width:8, amp:2.0, passes:3, color: INK});
+    }},
+    { name:"details", duration: 1100, render:(p)=>{
+      clear();
+      drawHandStroke(facePts, 1, {seed:10, width:11, amp:2.2, passes:3, color: INK});
+      drawHandStroke(leftEarPts, 1, {seed:21, width:9, amp:2.4, passes:3, color: INK});
+      drawHandStroke(rightEarPts, 1,{seed:22, width:9, amp:2.4, passes:3, color: INK});
+      drawHandStroke(leftEyePts, 1, {seed:31, width:6, amp:1.5, passes:2, color: INK});
+      drawHandStroke(rightEyePts, 1,{seed:32, width:6, amp:1.5, passes:2, color: INK});
+      drawHandStroke(snoutPts, 1, {seed:41, width:8, amp:2.0, passes:3, color: INK});
+
+      const p1 = Math.min(1, p*1.15);
+      const p2 = Math.max(0, Math.min(1, (p-0.25)*1.5));
+
+      drawHandStroke(nostrilLPts, p1, {seed:51, width:6, amp:1.2, passes:2, color: INK});
+      drawHandStroke(nostrilRPts, p1, {seed:52, width:6, amp:1.2, passes:2, color: INK});
+      drawHandStroke(mouthPts, p2, {seed:61, width:7, amp:1.8, passes:3, color: INK});
+    }},
+    { name:"yeah", duration: 1500, render:(p)=>{
+      clear();
+      drawPigComplete();
+      drawYeahHandwritten(p);
+    }},
+    { name:"confetti", duration: 2400, onEnter:()=>{
+        initRibbons(2026);
+      }, render:(p, elapsed, dt)=>{
+      clear();
+      drawPigComplete();
+      drawYeahHandwritten(1);
+      drawRibbons(dt);
+    }},
+  ];
+
+  let raf = 0;
+  let start = 0;
+  let lastT = 0;
+  let idx = 0;
+  let running = false;
+  let entered = new Set();
+
+  function animate(t){
+    if(!running) return;
+    if(!start) { start = t; lastT = t; }
+
+    const step = steps[idx];
+    if(step.onEnter && !entered.has(idx)){
+      entered.add(idx);
+      step.onEnter();
+    }
+
+    const elapsed = t - start;
+    const p = Math.min(1, elapsed / step.duration);
+    const dt = t - lastT;
+    lastT = t;
+
+    step.render(p, elapsed, dt);
+
+    if(p >= 1){
+      idx++;
+      start = t;
+      lastT = t;
+      if(idx >= steps.length){
+        running = false;
+        return;
+      }
+    }
+    raf = requestAnimationFrame(animate);
+  }
+
+  function replay(){
+    cancelAnimationFrame(raf);
+    idx = 0; start = 0; lastT = 0; running = true;
+    entered = new Set();
+    ribbons = null;
+    raf = requestAnimationFrame(animate);
+  }
+
+  function skip(){
+    cancelAnimationFrame(raf);
+    running = false;
+    clear();
+    drawPigComplete();
+    drawYeahHandwritten(1);
+    initRibbons(2026);
+    drawRibbons(16.67);
+  }
+
+  document.getElementById("replay").addEventListener("click", replay);
+  document.getElementById("skip").addEventListener("click", skip);
+
+  replay();
+})();
+</script>
+</body>
+</html>
